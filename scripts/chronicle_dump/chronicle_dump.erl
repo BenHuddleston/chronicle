@@ -65,8 +65,10 @@ parse_args_option(Option, Name, Fun, [Arg|Args], AccArgs, AccOptions, Spec) ->
     end.
 
 dump_logs(Args) ->
-    {Paths, Options} = parse_args(Args,
-                                  #{sanitize => {option, fun sanitize_opt/1}}),
+    {Paths, Options} =
+        parse_args(Args,
+                   #{sanitize => {option, fun sanitize_opt/1},
+                     'initargs-path' => {option, fun ignore_opt/1}}),
     dump_many(Paths,
               fun (Path) ->
                       dump_log(Path, Options)
@@ -134,6 +136,9 @@ unpack_entry(SanitizeFun, Entry) ->
               end
       end, Entry).
 
+ignore_opt(Value) ->
+    {ok, Value}.
+
 sanitize_opt(Value) ->
     case string:split(Value, ":", all) of
         [Module, Function] ->
@@ -196,9 +201,11 @@ get_value(Key, Props) ->
     end.
 
 dump_snapshots(Args) ->
-    {Paths, Options} = parse_args(Args,
-                                  #{raw => flag,
-                                    sanitize => {option, fun sanitize_opt/1}}),
+    {Paths, Options} =
+        parse_args(Args,
+                   #{raw => flag,
+                     sanitize => {option, fun sanitize_opt/1},
+                     'initargs-path' => {option, fun ignore_opt/1}}),
     dump_many(Paths,
               fun (Path) ->
                       dump_snapshot(Path, Options)
