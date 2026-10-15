@@ -64,8 +64,9 @@
 -type revisionreq() :: any | revision().
 
 -type read_consistency() :: local | quorum.
--type options() :: #{timeout => timeout(),
-                     read_consistency => read_consistency()}.
+-type write_options() :: #{timeout => timeout()}.
+-type read_options() :: #{timeout => timeout(),
+                          read_consistency => read_consistency()}.
 -type op_result() :: {ok, revision()}
                    | {error, {conflict, revision()}}.
 
@@ -119,7 +120,7 @@ event_manager(Name) ->
 add(Name, Key, Value) ->
     add(Name, Key, Value, #{}).
 
--spec add(name(), key(), value(), options()) -> op_result().
+-spec add(name(), key(), value(), write_options()) -> op_result().
 add(Name, Key, Value, Opts) ->
     submit_command(Name, {add, Key, Value},
                    get_timeout(Name, Opts)).
@@ -132,7 +133,8 @@ set(Name, Key, Value) ->
 set(Name, Key, Value, ExpectedRevision) ->
     set(Name, Key, Value, ExpectedRevision, #{}).
 
--spec set(name(), key(), value(), revisionreq(), options()) -> op_result().
+-spec set(name(), key(), value(), revisionreq(), write_options()) ->
+          op_result().
 set(Name, Key, Value, ExpectedRevision, Opts) ->
     submit_command(Name,
                    {set, Key, Value, ExpectedRevision},
@@ -166,7 +168,7 @@ delete(Name, Key) ->
 delete(Name, Key, ExpectedRevision) ->
     delete(Name, Key, ExpectedRevision, #{}).
 
--spec delete(name(), key(), revisionreq(), options()) -> op_result().
+-spec delete(name(), key(), revisionreq(), write_options()) -> op_result().
 delete(Name, Key, ExpectedRevision, Opts) ->
     submit_command(Name,
                    {delete, Key, ExpectedRevision},
@@ -183,7 +185,7 @@ delete(Name, Key, ExpectedRevision, Opts) ->
 multi(Name, Updates) ->
     multi(Name, Updates, #{}).
 
--spec multi(name(), multi_ops(), options()) -> op_result().
+-spec multi(name(), multi_ops(), write_options()) -> op_result().
 multi(Name, Updates, Opts) ->
     {TxnConditions, TxnUpdates} = multi_to_txn(Updates),
     submit_transaction(Name, TxnConditions, TxnUpdates,
@@ -222,7 +224,7 @@ multi_to_txn_loop([Update | Updates], TxnConditions, TxnUpdates) ->
 -type txn_ops() :: [txn_op()].
 -type txn_op() :: {set, key(), value()}
                 | {delete, key()}.
--type txn_options() :: options() | #{retries => non_neg_integer()}.
+-type txn_options() :: read_options() | #{retries => non_neg_integer()}.
 -type txn_fun(Data) :: fun ((Data) ->
                                {commit, txn_ops()} |
                                {commit, txn_ops(), Extra::any()} |
@@ -370,7 +372,7 @@ submit_transaction(Name, Conditions, Updates, Timeout) ->
 ro_txn(Name, Fun) ->
     ro_txn(Name, Fun, #{}).
 
--spec ro_txn(name(), ro_txn_fun(), options()) -> ro_txn_result().
+-spec ro_txn(name(), ro_txn_fun(), read_options()) -> ro_txn_result().
 ro_txn(Name, Fun, Opts) ->
     TRef = start_timeout(get_timeout(Name, Opts)),
     case prepare_txn(Name, Fun, TRef, Opts) of
@@ -386,7 +388,7 @@ ro_txn(Name, Fun, Opts) ->
 get(Name, Key) ->
     get(Name, Key, #{}).
 
--spec get(name(), key(), options()) -> get_result().
+-spec get(name(), key(), read_options()) -> get_result().
 get(Name, Key, Opts) ->
     optimistic_query(
       Name, {get, Key}, get_timeout(Name, Opts), Opts,
@@ -445,7 +447,7 @@ rewrite(Name, Fun, Opts) ->
 get_full_snapshot(Name) ->
     get_full_snapshot(Name, #{}).
 
--spec get_full_snapshot(name(), options()) -> get_snapshot_result().
+-spec get_full_snapshot(name(), read_options()) -> get_snapshot_result().
 get_full_snapshot(Name, Opts) ->
     submit_query(Name, get_full_snapshot, get_timeout(Name, Opts), Opts).
 
@@ -453,7 +455,8 @@ get_full_snapshot(Name, Opts) ->
 get_snapshot(Name, Keys) ->
     get_snapshot(Name, Keys, #{}).
 
--spec get_snapshot(name(), [key()], options()) -> get_snapshot_result().
+-spec get_snapshot(name(), [key()], read_options()) ->
+          get_snapshot_result().
 get_snapshot(Name, Keys, Opts) ->
     optimistic_query(
       Name, {get_snapshot, Keys}, get_timeout(Name, Opts), Opts,
