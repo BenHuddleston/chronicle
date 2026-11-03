@@ -18,15 +18,20 @@
 %% chronicle_kv feeds it the keys to track. Deadlines are local monotonic
 %% times that are reset to a full ttl on activation, so a key is never
 %% expired before its ttl has elapsed. Due keys are expired in a transaction
-%% built by the RSM's kv_expire_handlers entry, see chronicle_kv:expire/3
+%% built by the RSM's kv_expire_handlers entry, see chronicle_kv:expire/3. A
+%% touch restarts a key's deadline without a write, see chronicle_kv:touch/3
 -module(chronicle_kv_expiry).
 
 -behavior(gen_server).
 
 -include("chronicle.hrl").
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -export([start_link/1]).
--export([activate/2, deactivate/1, track/4, untrack/2]).
+-export([activate/2, deactivate/1, track/4, untrack/2, touch/2]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
@@ -55,7 +60,9 @@
                 %% Set after a failed expiry, so writes don't skip the backoff
                 retry_at :: undefined | integer(),
                 timer :: undefined | reference(),
-                expirer :: undefined | pid()}).
+                expirer :: undefined | pid(),
+                %% Keys in the batch that the expirer is working on
+                expiring = #{} :: #{key() => true}}).
 
 start_link(Name) ->
     gen_server:start_link(?START_NAME(server_name(Name)), ?MODULE, Name, []).
@@ -76,12 +83,29 @@ track(Name, Key, Revision, TTL) ->
 untrack(Name, Key) ->
     cast(Name, {untrack, Key}).
 
+%% Called by the RSM, and the server never calls into it, so can't deadlock
+-spec touch(atom(), [{key(), chronicle:revision()}]) ->
+          #{key() => ok | {error, not_found | expiring}}.
+touch(Name, Keys) ->
+    gen_server:call(?SERVER_NAME(server_name(Name)), {touch, Keys}, infinity).
+
 %% gen_server callbacks
 init(Name) ->
     %% TODO why trap exit? dangerour
     process_flag(trap_exit, true),
     {ok, #state{name = Name}}.
 
+
+handle_call({touch, Keys}, _From, State) ->
+    Now = now_ms(),
+    {Results, NewState} =
+        lists:foldl(
+          fun ({Key, Revision}, {AccResults, AccState}) ->
+                  {Result, NewAccState} =
+                      touch_key(Key, Revision, Now, AccState),
+                  {AccResults#{Key => Result}, NewAccState}
+          end, {#{}, State}, Keys),
+    {reply, Results, schedule(NewState)};
 
 handle_call(Call, _From, State) ->
     %% todo ?
@@ -125,14 +149,13 @@ handle_info({timeout, _, expire}, State) ->
 
 handle_info({expire_result, Pid, Batch, Result},
             #state{expirer = Pid} = State) ->
-    {noreply, handle_expire_result(Batch, Result,
-                                   State#state{expirer = undefined})};
+    {noreply, handle_expire_result(Batch, Result, clear_expirer(State))};
 
 handle_info({'EXIT', Pid, normal}, State) when is_pid(Pid) ->
     {noreply, State};
 handle_info({'EXIT', Pid, Reason}, #state{expirer = Pid} = State) ->
     ?WARNING("Expirer ~p died: ~p", [Pid, Reason]),
-    {noreply, schedule_retry(State#state{expirer = undefined})};
+    {noreply, schedule_retry(clear_expirer(State))};
 
 handle_info(Msg, State) ->
     ?WARNING("Unexpected message: ~p", [Msg]),
@@ -162,6 +185,21 @@ add_key(Key, Revision, TTL, Now, State) ->
     Id = {Now + TTL, erlang:unique_integer()},
     State#state{keys = Keys#{Key => {Id, Revision, TTL}},
                 deadlines = gb_trees:insert(Id, Key, Deadlines)}.
+
+%% A key being expired is refused, as the touch can't stop the expiry
+touch_key(Key, Revision, Now,
+          #state{keys = Keys, expiring = Expiring} = State) ->
+    case maps:find(Key, Keys) of
+        {ok, {_, Revision, TTL}} ->
+            case maps:is_key(Key, Expiring) of
+                true ->
+                    {{error, expiring}, State};
+                false ->
+                    {ok, add_key(Key, Revision, TTL, Now, State)}
+            end;
+        _ ->
+            {{error, not_found}, State}
+    end.
 
 remove_key(Key, #state{keys = Keys, deadlines = Deadlines} = State) ->
     case maps:take(Key, Keys) of
@@ -220,7 +258,9 @@ maybe_expire(State) ->
         [] ->
             schedule(State);
         Batch ->
-            State#state{expirer = spawn_expirer(Batch, State)}
+            State#state{expirer = spawn_expirer(Batch, State),
+                        expiring = maps:from_keys([K || {K, _} <- Batch],
+                                                  true)}
     end.
 
 due_keys(#state{keys = Keys, deadlines = Deadlines}) ->
@@ -257,7 +297,10 @@ stop_expirer(#state{expirer = undefined} = State) ->
 stop_expirer(#state{expirer = Pid} = State) ->
     chronicle_utils:terminate_linked_process(Pid, shutdown),
     ?FLUSH({expire_result, Pid, _, _}),
-    State#state{expirer = undefined}.
+    clear_expirer(State).
+
+clear_expirer(State) ->
+    State#state{expirer = undefined, expiring = #{}}.
 
 handle_expire_result(Batch, {ok, _Revision}, State) ->
     %% Keys that were rewritten in the meantime carry a new revision and
@@ -276,3 +319,15 @@ handle_expire_result(Batch, {ok, _Revision}, State) ->
 handle_expire_result(Batch, Error, State) ->
     ?WARNING("Failed to expire ~b keys: ~p", [length(Batch), Error]),
     schedule_retry(State).
+
+-ifdef(TEST).
+touch_key_test() ->
+    State = add_key(key, rev, 1000, 0, #state{name = test, active = true}),
+    {ok, Touched} = touch_key(key, rev, 500, State),
+    ?assertEqual(1500, next_deadline(Touched)),
+    ?assertMatch({{error, not_found}, _}, touch_key(key, other, 500, State)),
+    ?assertMatch({{error, not_found}, _}, touch_key(missing, rev, 500, State)),
+    ?assertMatch({{error, expiring}, _},
+                 touch_key(key, rev, 500,
+                           State#state{expiring = #{key => true}})).
+-endif.
